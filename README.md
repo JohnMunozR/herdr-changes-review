@@ -15,6 +15,7 @@ Allows you to review code changes made by AI agents or developers directly insid
 - **Thin Scrollbar**: Refined, unobtrusive vertical scrollbar that stays visible when needed and keeps delete actions easily accessible.
 - **Send to Agent**: One-click button (`Send to agent`) formats all your review notes and delivers them straight to the active AI agent via Herdr Core (`hc terminal write`).
 - **Dynamic Theme Colors**: Full support for any Herdr theme (light, dark, custom). Additions and deletions automatically inherit the theme's colors (`ansi2` for additions, `ansi1` for deletions) across line numbers, text, backgrounds, and hover highlights.
+- **Expandable Diff Context**: Click any hunk header (e.g. `@@ -1,12 +1,18 @@`) to toggle and expand the full surrounding file context directly in the diff viewer.
 - **Integrated Commit Box**: Toggle between **Review** and **Commit** anytime to commit your changes with git when you're done.
 
 ---
