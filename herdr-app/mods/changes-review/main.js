@@ -69,6 +69,7 @@ export default class ChangesReview extends View {
     this.commentText = "";
     this.sendingReview = false;
     this.busy = false;
+    this.expandedFiles = new Set();
 
     // Git commit input
     this.message = "";
@@ -303,6 +304,7 @@ export default class ChangesReview extends View {
       this.watched = null;
       this.closed = false;
       this.limited = false;
+      this.expandedFiles.clear();
     }
     if (!cwd) return;
     this.loading = true;
@@ -394,13 +396,16 @@ export default class ChangesReview extends View {
         lines = [`@@ -0,0 +1,${file.add} @@`, ...text.slice(0, 400000).replace(/\n$/, "").split("\n").slice(0, 1500).map(l => `+${l}`)];
       }
     } else {
-      const r = await exec("git", [...READ, "diff", ...(this.hasHead ? ["HEAD"] : []), "--no-ext-diff", "--no-textconv", "--no-color", "--", path], { cwd: root, on });
+      const isExpanded = Boolean(this.expandedFiles && this.expandedFiles.has(path));
+      const diffArgs = ["diff", ...(this.hasHead ? ["HEAD"] : []), ...(isExpanded ? ["-U99999"] : []), "--no-ext-diff", "--no-textconv", "--no-color", "--", path];
+      const r = await exec("git", [...READ, ...diffArgs], { cwd: root, on });
       if (r.code !== 0) throw new Error(r.stderr || "git diff failed");
       const all = r.stdout.replace(/\n$/, "").split("\n"), first = all.findIndex((l) => l.startsWith("@@"));
       lines = first < 0 ? [file.binary ? "Binary file changed" : "No text diff available"] : all.slice(first);
     }
     if ((key() === context || !context) && this.open === path) {
-      this.setLines(lines.slice(0, 1500).map(line => line.length > 4000 ? line.slice(0, 4000) + "… (line truncated)" : line));
+      const limit = Boolean(this.expandedFiles && this.expandedFiles.has(path)) ? 10000 : 1500;
+      this.setLines(lines.slice(0, limit).map(line => line.length > 4000 ? line.slice(0, 4000) + "… (line truncated)" : line));
     }
   }
 
@@ -428,9 +433,40 @@ export default class ChangesReview extends View {
     cx.notify();
   }
 
+  toggleExpand(path, cx) {
+    if (!path || this.loading) return;
+    if (this.expandedFiles.has(path)) {
+      this.expandedFiles.delete(path);
+    } else {
+      this.expandedFiles.add(path);
+    }
+    const context = this.context;
+    cx.spawn(async (cx) => {
+      try {
+        await this.load(path, context);
+      } catch (e) {
+        if (key() === context && this.open === path) {
+          this.note = `Cannot preview this diff (too large or unreadable): ${e.message || e}`;
+        }
+      }
+      cx.notify();
+    });
+    cx.notify();
+  }
+
   diffRow({ kind, number, text }, t) {
     if (kind === "@") {
-      return div().w_full().px(12).h(20).flex_none().truncate().bg(t.raised).text_color(t.dim).child(text);
+      const isExpanded = Boolean(this.expandedFiles && this.expandedFiles.has(this.open));
+      return h_flex().w_full().px(12).h(20).flex_none().items_center().justify_between()
+        .bg(t.raised).border_b(1).border_color(t.border)
+        .cursor_pointer()
+        .hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => this.toggleExpand(this.open, cx))
+        .child(div().min_w(0).truncate().text_size(11).text_color(t.dim).child(text))
+        .child(
+          div().flex_none().px(5).py(0.5).rounded(3).bg(t.background).text_size(9.5).text_color(t.muted)
+            .child(isExpanded ? "Collapse context" : "Expand context")
+        );
     }
     const isCommentable = number !== undefined;
     const existing = isCommentable ? this.getComment(this.open, number) : null;
