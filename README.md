@@ -22,7 +22,17 @@ Allows you to review code changes made by AI agents or developers directly insid
 
 ## Installation
 
-### One-line Install (Recommended)
+### Standard Herdr Method (Recommended)
+
+In Herdr, you can ask any of your coding agents (Claude, Codex, Antigravity, etc.) to install it following the Herdr standard:
+
+> **"Read ~/.config/herdr-app/AGENTS.md, then add this mod: https://github.com/JohnMunozR/herdr-changes-review"**
+
+The agent will read the [`RECIPE.md`](RECIPE.md), copy `mods/changes-review` to `~/.config/herdr-app/mods/changes-review`, update your personal layout (`main-copy.json`), and verify it with `herdr-app check`.
+
+---
+
+### One-line Terminal Install
 
 Run directly in your terminal:
 
@@ -30,15 +40,29 @@ Run directly in your terminal:
 curl -fsSL https://raw.githubusercontent.com/JohnMunozR/herdr-changes-review/main/install.sh | bash
 ```
 
-### Manual Install
+---
 
-Clone the repository and run:
+### Manual Installation (Steps from AGENTS.md)
 
-```bash
-git clone https://github.com/JohnMunozR/herdr-changes-review.git
-cd herdr-changes-review
-./install.sh
-```
+1. Clone or download this repository.
+2. Copy the `mods/changes-review` folder to `~/.config/herdr-app/mods/changes-review`:
+   ```bash
+   cp -r mods/changes-review ~/.config/herdr-app/mods/
+   ```
+3. In your personal layout (`~/.config/herdr-app/layouts/main-copy.json`), point the `changes` panel to `changes-review`:
+   ```json
+   {
+     "id": "changes",
+     "type": "block",
+     "content": {
+       "mod": "changes-review"
+     }
+   }
+   ```
+4. Verify the mod:
+   ```bash
+   herdr-app check ~/.config/herdr-app/mods/changes-review
+   ```
 
 ### What the installer does:
 
