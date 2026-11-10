@@ -81,4 +81,4 @@ herdr-changes-review/
 
 ## License
 
-MIT
+Apache-2.0 License. See [LICENSE](LICENSE) for details.
