@@ -22,16 +22,22 @@ Allows you to review code changes made by AI agents or developers directly insid
 
 ## Installation
 
-Run the installer inside this repository:
+### One-line Install (Recommended)
+
+Run directly in your terminal:
 
 ```bash
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/JohnMunozR/herdr-changes-review/main/install.sh | bash
 ```
 
-Or run via `sh`:
+### Manual Install
+
+Clone the repository and run:
 
 ```bash
-sh install.sh
+git clone https://github.com/JohnMunozR/herdr-changes-review.git
+cd herdr-changes-review
+./install.sh
 ```
 
 ### What the installer does:

@@ -85,6 +85,29 @@ fi
 
 # Mode: install
 say "Installing changes-review mod into: $target_mod"
+
+tmp_dir=""
+cleanup() {
+  if [ -n "$tmp_dir" ] && [ -d "$tmp_dir" ]; then
+    rm -rf "$tmp_dir"
+  fi
+}
+trap cleanup EXIT
+
+if [ ! -d "$mod_src" ]; then
+  say "Fetching herdr-changes-review files from GitHub..."
+  tmp_dir="$(mktemp -d)"
+  if command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+    curl -fsSL https://github.com/JohnMunozR/herdr-changes-review/archive/refs/heads/main.tar.gz | tar -xz -C "$tmp_dir"
+    mod_src="$tmp_dir/herdr-changes-review-main/herdr-app/mods/changes-review"
+  elif command -v git >/dev/null 2>&1; then
+    git clone --depth 1 https://github.com/JohnMunozR/herdr-changes-review.git "$tmp_dir/repo"
+    mod_src="$tmp_dir/repo/herdr-app/mods/changes-review"
+  else
+    die "Cannot download files: neither curl+tar nor git are available"
+  fi
+fi
+
 [ -d "$mod_src" ] || die "Mod source directory not found: $mod_src"
 
 mkdir -p "$target_mods"
