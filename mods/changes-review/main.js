@@ -43,6 +43,18 @@ function hexWithAlpha(color, alphaHex) {
   return color;
 }
 
+function getDiffTheme(t) {
+  const { add, del } = getDiffColors(t);
+  return {
+    add,
+    del,
+    addBg: hexWithAlpha(add, "22"),
+    delBg: hexWithAlpha(del, "22"),
+    addHover: hexWithAlpha(add, "35"),
+    delHover: hexWithAlpha(del, "35"),
+  };
+}
+
 // Numbers each diff line once, so a frame only draws the rows on screen.
 function diffRows(lines) {
   let old = 0, next = 0;
@@ -54,6 +66,24 @@ function diffRows(lines) {
     if (kind === "+") return { kind, number: next++, text: line.slice(1) || " " };
     if (kind === " ") { old++; return { kind, number: next++, text: line.slice(1) || " " }; }
     return { kind: "", text: line };
+  });
+}
+
+async function currentBranch(root, on) {
+  const r = await exec("git", [...READ, "branch", "--show-current"], { cwd: root, on }).catch(() => null);
+  if (r && r.code === 0 && r.stdout.trim()) return r.stdout.trim();
+  const h = await exec("git", [...READ, "rev-parse", "--abbrev-ref", "HEAD"], { cwd: root, on }).catch(() => null);
+  return (h && h.code === 0 && h.stdout.trim()) ? h.stdout.trim() : "HEAD";
+}
+
+async function listCommits(root, ref, on) {
+  if (!ref) return [];
+  const r = await exec("git", [...READ, "log", ref, "-n", "20", "--format=%h%x09%s%x09%an%x09%cr%x09%H"], { cwd: root, on }).catch(() => null);
+  if (!r || r.code !== 0) return [];
+  const lines = (r.stdout || "").trim().split("\n").filter(Boolean);
+  return lines.map((line) => {
+    const [shortHash, subject, author, date, hash] = line.split("\t");
+    return { shortHash, subject, author, date, hash };
   });
 }
 
@@ -70,6 +100,15 @@ export default class ChangesReview extends View {
     this.sendingReview = false;
     this.busy = false;
     this.expandedFiles = new Set();
+
+    // Git inspection & commit viewer state
+    this.viewMode = "working"; // "working" | "commit"
+    this.currentBranch = "main";
+    this.commits = [];
+    this.selectedCommit = null;
+    this.showCommitMenu = false;
+    this.workingFiles = [];
+    this.workingFilesCount = 0;
 
     // Git commit input
     this.message = "";
@@ -219,8 +258,12 @@ export default class ChangesReview extends View {
     cx.notify();
 
     try {
+      let header = "Review comments on uncommitted changes:";
+      if (this.viewMode === "commit" && this.selectedCommit) {
+        header = `Review comments on commit ${this.selectedCommit.shortHash} ("${this.selectedCommit.subject}"):`;
+      }
       const parts = [
-        "Review comments on uncommitted changes:",
+        header,
         ""
       ];
       for (const r of this.reviews) {
@@ -246,6 +289,87 @@ export default class ChangesReview extends View {
       this.sendingReview = false;
       cx.notify();
     }
+  }
+
+  switchMode(mode, target, cx) {
+    this.showCommitMenu = false;
+    this.viewMode = mode;
+    this.note = null;
+    this.error = null;
+
+    if (mode === "working") {
+      this.selectedCommit = null;
+      this.files = this.workingFiles || [];
+      this.open = this.files.length ? this.files[0].path : null;
+      this.setLines([]);
+      if (this.open) {
+        const context = this.context;
+        cx.spawn(async (cx) => {
+          try { await this.load(this.open, context); } catch {}
+          cx.notify();
+        });
+      }
+      cx.notify();
+      return;
+    }
+
+    if (mode === "commit" && target) {
+      this.selectedCommit = target;
+      this.loadCommitFiles(target.hash, cx);
+      return;
+    }
+
+    cx.notify();
+  }
+
+  loadCommitFiles(hash, cx) {
+    const root = this.root, on = this.on, context = this.context;
+    if (!root || !hash) return;
+    this.loading = true;
+    this.files = [];
+    this.setLines([]);
+    this.open = null;
+    this.expandedFiles.clear();
+    cx.notify();
+
+    cx.spawn(async (cx) => {
+      try {
+        const git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
+        const numResult = await git(["diff-tree", "-r", "--no-commit-id", "--root", "--no-renames", "--numstat", "-z", hash]);
+        const statResult = await git(["diff-tree", "-r", "--no-commit-id", "--root", "--no-renames", "--name-status", "-z", hash]);
+        if (numResult.code !== 0) throw new Error(numResult.stderr || "Failed to load commit stats");
+
+        const stats = {};
+        for (const entry of (numResult.stdout || "").split("\0")) {
+          const [a, d, ...parts] = entry.split("\t");
+          if (!parts.length) continue;
+          const path = parts.join("\t");
+          stats[path] = { add: Number(a) || 0, del: Number(d) || 0, binary: a === "-" };
+        }
+
+        const files = [];
+        const statEntries = (statResult.stdout || "").split("\0").filter(Boolean);
+        for (let i = 0; i < statEntries.length; i += 2) {
+          const status = statEntries[i]?.charAt(0) || "M";
+          const path = statEntries[i + 1];
+          if (!path) continue;
+          const stat = stats[path] ?? { add: 0, del: 0 };
+          files.push({ path, status, fresh: false, ...stat });
+        }
+
+        if (key() !== context) return;
+        this.files = files;
+        if (files.length) {
+          this.open = files[0].path;
+          await this.load(this.open, context);
+        }
+      } catch (e) {
+        if (key() === context) this.error = String(e.message || e);
+      } finally {
+        this.loading = false;
+        cx.notify();
+      }
+    });
   }
 
   commit(cx) {
@@ -305,6 +429,12 @@ export default class ChangesReview extends View {
       this.closed = false;
       this.limited = false;
       this.expandedFiles.clear();
+      this.viewMode = "working";
+      this.showBranchMenu = false;
+      this.showCommitMenu = false;
+      this.selectedCommit = null;
+      this.workingFiles = [];
+      this.workingFilesCount = 0;
     }
     if (!cwd) return;
     this.loading = true;
@@ -331,6 +461,12 @@ export default class ChangesReview extends View {
           this.error = "Not a git repository";
           return;
         }
+
+        const curBranch = await currentBranch(root, on);
+        if (key() !== context) return;
+        this.currentBranch = curBranch;
+        this.commits = await listCommits(root, curBranch, on);
+
         const git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
         const status = await git(["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"]);
         if (status.code !== 0) throw new Error(status.stderr);
@@ -359,20 +495,25 @@ export default class ChangesReview extends View {
         this.root = root;
         this.on = on;
         this.hasHead = head.code === 0;
-        this.files = files;
-        this.limited = entries.length > 1000;
-        this.error = null;
+        this.workingFiles = files;
+        this.workingFilesCount = files.length;
         this.watch(root, cx);
-        if (this.open && !files.some((f) => f.path === this.open)) {
-          this.open = null;
-          this.setLines([]);
-        }
-        if (!this.open && !this.closed && files.length) {
-          this.open = files[0].path;
-        }
-        if (this.open) {
-          try { await this.load(this.open, context); }
-          catch { if (key() === context && this.open) this.setLines(["Cannot preview this diff (too large or unreadable)"]); }
+
+        if (this.viewMode === "working") {
+          this.files = files;
+          this.limited = entries.length > 1000;
+          this.error = null;
+          if (this.open && !files.some((f) => f.path === this.open)) {
+            this.open = null;
+            this.setLines([]);
+          }
+          if (!this.open && !this.closed && files.length) {
+            this.open = files[0].path;
+          }
+          if (this.open) {
+            try { await this.load(this.open, context); }
+            catch { if (key() === context && this.open) this.setLines(["Cannot preview this diff (too large or unreadable)"]); }
+          }
         }
       } catch (e) {
         if (key() === context) this.error = String(e);
@@ -387,25 +528,40 @@ export default class ChangesReview extends View {
     const file = this.files.find((f) => f.path === path), root = this.root, on = this.on;
     if (!file || !root) return;
     let lines;
-    if (file.fresh || (!this.hasHead && file.status === "A")) {
-      const text = await readTextFile(`${root}/${path}`, { on }).catch(() => null);
-      if (text === null) lines = ["Cannot preview this file (binary, too large, or unreadable)"];
-      else if (text.includes("\0")) lines = ["Binary file · no text diff"];
-      else {
-        file.add = countLines(text);
-        lines = [`@@ -0,0 +1,${file.add} @@`, ...text.slice(0, 400000).replace(/\n$/, "").split("\n").slice(0, 1500).map(l => `+${l}`)];
+    const isExpanded = Boolean(this.expandedFiles && this.expandedFiles.has(path));
+
+    if (this.viewMode === "working") {
+      if (file.fresh || (!this.hasHead && file.status === "A")) {
+        const text = await readTextFile(`${root}/${path}`, { on }).catch(() => null);
+        if (text === null) lines = ["Cannot preview this file (binary, too large, or unreadable)"];
+        else if (text.includes("\0")) lines = ["Binary file · no text diff"];
+        else {
+          file.add = countLines(text);
+          lines = [`@@ -0,0 +1,${file.add} @@`, ...text.slice(0, 400000).replace(/\n$/, "").split("\n").slice(0, 450).map(l => `+${l}`)];
+        }
+      } else {
+        const diffArgs = ["diff", ...(this.hasHead ? ["HEAD"] : []), ...(isExpanded ? ["-U99999"] : []), "--no-ext-diff", "--no-textconv", "--no-color", "--", path];
+        const r = await exec("git", [...READ, ...diffArgs], { cwd: root, on });
+        if (r.code !== 0) throw new Error(r.stderr || "git diff failed");
+        const all = r.stdout.replace(/\n$/, "").split("\n"), first = all.findIndex((l) => l.startsWith("@@"));
+        lines = first < 0 ? [file.binary ? "Binary file changed" : "No text diff available"] : all.slice(first);
       }
-    } else {
-      const isExpanded = Boolean(this.expandedFiles && this.expandedFiles.has(path));
-      const diffArgs = ["diff", ...(this.hasHead ? ["HEAD"] : []), ...(isExpanded ? ["-U99999"] : []), "--no-ext-diff", "--no-textconv", "--no-color", "--", path];
+    } else if (this.viewMode === "commit" && this.selectedCommit) {
+      const diffArgs = ["show", this.selectedCommit.hash, ...(isExpanded ? ["-U99999"] : []), "--no-ext-diff", "--no-textconv", "--no-color", "--", path];
       const r = await exec("git", [...READ, ...diffArgs], { cwd: root, on });
-      if (r.code !== 0) throw new Error(r.stderr || "git diff failed");
+      if (r.code !== 0) throw new Error(r.stderr || "git show failed");
       const all = r.stdout.replace(/\n$/, "").split("\n"), first = all.findIndex((l) => l.startsWith("@@"));
       lines = first < 0 ? [file.binary ? "Binary file changed" : "No text diff available"] : all.slice(first);
     }
     if ((key() === context || !context) && this.open === path) {
-      const limit = Boolean(this.expandedFiles && this.expandedFiles.has(path)) ? 10000 : 1500;
-      this.setLines(lines.slice(0, limit).map(line => line.length > 4000 ? line.slice(0, 4000) + "… (line truncated)" : line));
+      const maxLines = isExpanded ? 800 : 350;
+      let finalLines = lines || [];
+      if (finalLines.length > maxLines) {
+        const remaining = finalLines.length - maxLines;
+        finalLines = finalLines.slice(0, maxLines);
+        finalLines.push(`@@ -0,0 +0,0 @@ [Diff preview truncated: showing first ${maxLines} lines. ${remaining} more lines hidden. ${isExpanded ? "File is very large." : "Click Expand context above for more."}]`);
+      }
+      this.setLines(finalLines.map(line => line.length > 4000 ? line.slice(0, 4000) + "… (line truncated)" : line));
     }
   }
 
@@ -454,7 +610,7 @@ export default class ChangesReview extends View {
     cx.notify();
   }
 
-  diffRow({ kind, number, text }, t) {
+  diffRow({ kind, number, text }, t, dt, commentMap) {
     if (kind === "@") {
       const isExpanded = Boolean(this.expandedFiles && this.expandedFiles.has(this.open));
       return h_flex().w_full().px(12).h(20).flex_none().items_center().justify_between()
@@ -469,17 +625,15 @@ export default class ChangesReview extends View {
         );
     }
     const isCommentable = number !== undefined;
-    const existing = isCommentable ? this.getComment(this.open, number) : null;
+    const existing = (isCommentable && commentMap) ? commentMap.get(number) : null;
     const isActive = this.activeComment && this.activeComment.file === this.open && this.activeComment.line === number;
     const canSave = Boolean(this.commentText.trim());
 
-    const { add, del } = getDiffColors(t);
     const isAdd = kind === "+";
     const isDel = kind === "-";
-    const diffColor = isAdd ? add : isDel ? del : null;
-
-    const rowBg = isAdd ? hexWithAlpha(add, "22") : isDel ? hexWithAlpha(del, "22") : null;
-    const hoverBg = isAdd ? hexWithAlpha(add, "35") : isDel ? hexWithAlpha(del, "35") : t.hover;
+    const diffColor = isAdd ? dt.add : isDel ? dt.del : null;
+    const rowBg = isAdd ? dt.addBg : isDel ? dt.delBg : null;
+    const hoverBg = isAdd ? dt.addHover : isDel ? dt.delHover : t.hover;
 
     const row = h_flex().w_full().h(20).flex_none().gap(10).cursor_pointer()
       .when(Boolean(rowBg), (e) => e.bg(rowBg))
@@ -563,14 +717,32 @@ export default class ChangesReview extends View {
   render(cx) {
     if (key() !== this.context) this.refresh(cx);
     const t = theme(), addCount = this.files.reduce((n, f) => n + f.add, 0), delCount = this.files.reduce((n, f) => n + f.del, 0);
-    const { add, del } = getDiffColors(t);
+    const dt = getDiffTheme(t);
+    const { add, del } = dt;
     const commitEnabled = Boolean(this.message.trim() && this.root && !this.busy && !this.loading);
     const agent = this.findActiveAgent();
     const agentName = agent ? (agent.title || agent.app || agent.address) : null;
+    const mono = settings()?.font_family ?? "JetBrains Mono";
 
-    return v_flex().id("changes").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)
+    const commentMap = new Map();
+    if (this.open && this.reviews.length > 0) {
+      for (const r of this.reviews) {
+        if (r.file === this.open) {
+          commentMap.set(r.line, r);
+        }
+      }
+    }
+
+    return v_flex().id("changes").size_full().min_h(0).rounded(10).overflow_hidden().relative().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)
       .on_key_down((e, cx) => {
         if (e.key === "escape") {
+          if (this.showCommitMenu) {
+            this.showCommitMenu = false;
+            this.handle.focus();
+            cx.stop_propagation();
+            cx.notify();
+            return;
+          }
           if (this.typingComment || this.activeComment) {
             this.cancelActiveComment(cx);
             this.handle.focus();
@@ -591,10 +763,58 @@ export default class ChangesReview extends View {
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().child("Changes"))
         .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(`${this.files.length} files`))
+
+        // Commit selector dropdown button right beside "Changes" and file counter
+        .child(
+          h_flex().id("commit-selector-btn").h(24).px(8).gap(6).items_center().rounded(5)
+            .min_w(0).max_w(220)
+            .bg(this.showCommitMenu ? t.selected : t.background).border_1().border_color(this.showCommitMenu ? t.accent : t.border)
+            .cursor_pointer().hover(s => s.bg(t.hover))
+            .on_click((_e, cx) => {
+              this.showCommitMenu = !this.showCommitMenu;
+              cx.notify();
+            })
+            .child(
+              svg("mods/changes-review/icons/git-commit.svg")
+                .size(11).flex_none()
+                .text_color(this.viewMode === "working" ? t.muted : t.accent || t.foreground)
+            )
+            .child(
+              div().flex_1().min_w(0).truncate().text_size(11).font_medium()
+                .text_color(t.foreground)
+                .child(
+                  this.viewMode === "working"
+                    ? "Working Tree"
+                    : this.selectedCommit
+                      ? `${this.selectedCommit.shortHash}: ${this.selectedCommit.subject}`
+                      : "Select commit"
+                )
+            )
+            .when(this.viewMode === "working" && this.workingFilesCount > 0, el => el.child(
+              div().flex_none().px(4).py(0.5).rounded(3).bg(t.raised).text_size(9.5).text_color(t.muted).child(String(this.workingFilesCount))
+            ))
+            .child(svg("mods/changes-review/icons/chevron-down.svg").size(9).flex_none().text_color(t.dim))
+        )
+
+        // Quick return to Working Tree if currently viewing a commit
+        .when(this.viewMode !== "working", el => el.child(
+          h_flex().id("quick-working-tree-btn").h(22).px(7).gap(4).items_center().rounded(4)
+            .bg(t.background).border_1().border_color(t.border)
+            .cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground))
+            .text_color(t.muted).text_size(10.5)
+            .on_click((_e, cx) => {
+              this.switchMode("working", null, cx);
+            })
+            .child("⚡ Working Tree")
+            .when(this.workingFilesCount > 0, b => b.child(
+              div().px(3.5).py(0.5).rounded(3).bg(t.raised).text_size(9).child(String(this.workingFilesCount))
+            ))
+        ))
+
         .child(div().flex_1())
         .child(div().text_size(11).text_color(add).child(`+${addCount}`))
         .child(div().text_size(11).text_color(del).child(`−${delCount}`)))
-      
+
       // File list (changes-list)
       .child(v_flex().id("changes-list").flex_none().h(Math.min(160, Math.max(44, this.files.length * 28 + 12))).overflow_y_scrollbar().p(6).border_b(1).border_color(t.border).children(this.files.map((f) => {
         const parts = f.path.split("/"), name = parts.pop();
@@ -606,14 +826,16 @@ export default class ChangesReview extends View {
           .child(h_flex().flex_1().min_w(0).child(div().text_color(t.dim).truncate().child(parts.length ? parts.join("/") + "/" : "")).child(div().max_w(260).min_w(0).truncate().child(name)))
           .when(f.add > 0, (e) => e.child(div().text_size(11).text_color(add).child(`+${f.add}`)))
           .when(f.del > 0, (e) => e.child(div().text_size(11).text_color(del).child(`−${f.del}`)));
-      })).when(!this.files.length, (e) => e.child(div().p(8).text_color(t.dim).child(this.error || (this.loading ? "Loading changes…" : this.root ? "No uncommitted changes" : "No folder")))))
+      })).when(!this.files.length, (e) => e.child(div().p(8).text_color(t.dim).child(
+        this.error || (this.loading ? "Loading changes…" : this.root ? (this.viewMode === "commit" ? "No files changed in this commit" : "No uncommitted changes") : "No folder")
+      ))))
       
       .when(this.limited, el => el.child(div().px(12).py(4).text_size(11).text_color(t.dim).child("Showing the first 1,000 changed files")))
       
       // Diff area
       .child(div().flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(11)
         .child(v_flex().id("changes-diff-lines").size_full().overflow_y_scrollbar().children(
-          this.rows.map((row) => this.diffRow(row, t))
+          this.rows.map((row) => this.diffRow(row, t, dt, commentMap))
         ))
         .when(!this.open && this.files.length > 0, (e) => e.child(div().absolute().top(6).px(12).text_color(t.dim).child("Select a file to view its changes"))))
       .when(Boolean(this.note), (e) => e.child(div().px(10).pb(4).text_size(11).text_color(del).child(this.note)))
@@ -640,22 +862,38 @@ export default class ChangesReview extends View {
           )
       )
 
-      // Commit section (exact original commit bar)
+      // Commit section (Working Tree commit input, or switch button if viewing historical commit/branch)
       .when(this.bottomTab === "commit", el => el.child(
-        h_flex().flex_none().p(10).gap(8).border_t(1).border_color(t.border).bg(t.background)
-          .child(
-            div().id("commit-message").flex_1().min_w(0).h(32).px(10).flex().items_center().rounded(8).border_1().border_color(this.typingCommit ? t.accent : t.border).bg(t.background).cursor_text().on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-              .child(Input.new(this.input).h_full().text_size(12).text_color(t.foreground))
-          )
-          .child(
-            div().id("commit").h(32).px(14).flex().items_center().rounded(8)
-              .bg(commitEnabled ? t.solid : t.raised)
-              .text_color(commitEnabled ? t.solid_foreground : t.dim)
-              .text_size(12)
-              .when(commitEnabled, (e) => e.cursor_pointer())
-              .on_click((_e, cx) => this.commit(cx))
-              .child(this.busy ? "Committing…" : "Commit")
-          )
+        this.viewMode === "working"
+          ? h_flex().flex_none().p(10).gap(8).border_t(1).border_color(t.border).bg(t.background)
+              .child(
+                div().id("commit-message").flex_1().min_w(0).h(32).px(10).flex().items_center().rounded(8).border_1().border_color(this.typingCommit ? t.accent : t.border).bg(t.background).cursor_text().on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+                  .child(Input.new(this.input).h_full().text_size(12).text_color(t.foreground))
+              )
+              .child(
+                div().id("commit").h(32).px(14).flex().items_center().rounded(8)
+                  .bg(commitEnabled ? t.solid : t.raised)
+                  .text_color(commitEnabled ? t.solid_foreground : t.dim)
+                  .text_size(12)
+                  .when(commitEnabled, (e) => e.cursor_pointer())
+                  .on_click((_e, cx) => this.commit(cx))
+                  .child(this.busy ? "Committing…" : "Commit")
+              )
+          : h_flex().flex_none().p(10).gap(8).items_center().justify_between().border_t(1).border_color(t.border).bg(t.background)
+              .child(
+                h_flex().gap(6).items_center().text_size(12).text_color(t.dim)
+                  .child(svg("mods/changes-review/icons/git-commit.svg").size(12).text_color(t.muted))
+                  .child(div().child("Commits can only be made on uncommitted Working Tree changes."))
+              )
+              .child(
+                h_flex().h(28).px(10).items_center().rounded(6).bg(t.raised).border_1().border_color(t.border)
+                  .text_size(11.5).text_color(t.foreground).cursor_pointer()
+                  .hover(s => s.bg(t.hover))
+                  .on_click((_e, cx) => {
+                    this.switchMode("working", null, cx);
+                  })
+                  .child("Switch to Working Tree")
+              )
       ))
 
       // Review section (scrollable list of notes + send to agent without counter)
@@ -716,6 +954,60 @@ export default class ChangesReview extends View {
                       .child(svg("mods/changes-review/icons/send.svg").size(11).text_color(this.reviews.length > 0 && !this.sendingReview ? t.solid_foreground : t.dim))
                       .child(div().child(this.sendingReview ? "Sending…" : "Send to agent"))
                   )
+              )
+          )
+      ))
+
+      // Floating commit dropdown overlay (responsive positioning for all screen and pane sizes)
+      .when(this.showCommitMenu, el => el.child(
+        div().id("commit-menu-overlay").absolute().inset_0()
+          .on_mouse_down("left", (_e, cx) => {
+            this.showCommitMenu = false;
+            cx.notify();
+          })
+          .child(
+            v_flex().id("commit-dropdown-floating")
+              .absolute().top(43).left(10).right(10).max_w(360).max_h(320)
+              .rounded(8).bg(t.raised).border_1().border_color(t.border).shadow_xl().p(4).gap(2)
+              .overflow_y_scrollbar()
+              .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+              .child(
+                h_flex().id("select-working-tree").min_h(28).py(3).flex_none().px(8).gap(7).items_center().rounded(5).cursor_pointer()
+                  .when(this.viewMode === "working", s => s.bg(t.selected))
+                  .hover(s => s.bg(t.hover))
+                  .on_click((_e, cx) => this.switchMode("working", null, cx))
+                  .child(svg("mods/changes-review/icons/git-commit.svg").size(11).flex_none().text_color(this.viewMode === "working" ? t.accent || t.foreground : t.muted))
+                  .child(div().text_size(11).font_medium().child("Working Tree"))
+                  .child(div().text_size(10).text_color(t.dim).child("Uncommitted"))
+                  .child(div().flex_1())
+                  .when(this.workingFilesCount > 0, b => b.child(
+                    div().flex_none().px(4).py(0.5).rounded(3).bg(t.background).text_size(9).text_color(t.muted).child(String(this.workingFilesCount))
+                  ))
+              )
+              .child(div().h(1).w_full().bg(t.border).my(1).flex_none())
+              .children(
+                this.commits.map(c => {
+                  const isSelected = this.viewMode === "commit" && this.selectedCommit?.hash === c.hash;
+                  return h_flex().id(`commit-item-${c.shortHash}`).min_h(34).py(3.5).flex_none().px(8).gap(7).items_center().rounded(5).cursor_pointer()
+                    .when(isSelected, s => s.bg(t.selected))
+                    .hover(s => s.bg(t.hover))
+                    .on_click((_e, cx) => this.switchMode("commit", c, cx))
+                    .child(svg("mods/changes-review/icons/git-commit.svg").size(11).flex_none().text_color(isSelected ? t.accent || t.foreground : t.muted))
+                    .child(
+                      v_flex().flex_1().min_w(0).gap(1.5)
+                        .child(
+                          h_flex().gap(6).items_center()
+                            .child(div().flex_none().font_family(mono).text_size(10).font_medium().text_color(isSelected ? t.foreground : t.dim).child(c.shortHash))
+                            .child(div().flex_1().min_w(0).truncate().text_size(11).font_medium().text_color(t.foreground).child(c.subject))
+                        )
+                        .child(
+                          h_flex().gap(5).items_center().text_size(9).text_color(t.dim)
+                            .child(div().truncate().child(c.author))
+                            .child(div().child("·"))
+                            .child(div().flex_none().child(c.date))
+                        )
+                    );
+                })
               )
           )
       ));

@@ -9,6 +9,8 @@ Allows you to review code changes made by AI agents or developers directly insid
 ## Features
 
 - **Minimalist, Native UI**: Integrates directly into Herdr's existing Changes panel without disrupting the native layout or adding unnecessary panes.
+- **IntelliJ-Inspired Commit Selector**: Switch seamlessly between live uncommitted changes (*Working Tree*) and specific historical commits (last 20 commits of the current branch with hash, subject, author, and timestamp).
+- **Context-Aware Agent Feedback**: Leave inline review notes on both uncommitted and already committed changes; clicking **Send to agent** automatically includes the commit hash and title context for the AI agent.
 - **Inline Review Notes**: Click any changed line in the diff viewer to compose or edit an inline review note right underneath that line.
 - **Multi-Line Note Editing**: Auto-wrapping textarea with cursor support, full keyboard shortcuts, and neat multi-line inline display.
 - **Review List & Navigation**: Bottom **Review** tab shows a scrollable list of all your review comments. Clicking any item jumps directly to the file and line.
